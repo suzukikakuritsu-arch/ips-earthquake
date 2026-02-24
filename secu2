@@ -1,0 +1,26 @@
+import hashlib, numpy as np
+from datetime import datetime
+
+class PerfectIPSProtector:
+    PHI = (1 + np.sqrt(5)) / 2
+    
+    def __init__(self):
+        self.original_fp = self._phi_hash("IPS安定性定理 lim J_i(t)=J_i*")
+        self.registry = {}  # ブロックチェーン風登録
+    
+    def _phi_hash(self, text):
+        fib = [1,1]; weights = fib * (len(text)//2 + 1)
+        weighted = sum(ord(c) * weights[i] * self.PHI for i,c in enumerate(text))
+        return hashlib.sha256(str(weighted).encode()).hexdigest()
+    
+    def register_asset(self, content, category="theory"):
+        timestamp = datetime.now().isoformat()
+        fp = self._phi_hash(content)
+        self.registry[timestamp] = {"fp": fp, "cat": category, "ori_fp": self.original_fp}
+        return timestamp
+    
+    def scan_suspect(self, code):
+        triggers = sum([ "(1+sqrt(5))/2" in code, "tanh" in code, "log_phi" in code ])
+        sus_fp = self._phi_hash(code)
+        score = 1 if triggers >= 2 and sus_fp[:16] == self.original_fp[:16] else 0
+        return {"risk": "CRITICAL" if score else "CLEAR", "phi_match": sus_fp[:16]}
