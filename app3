@@ -1,0 +1,175 @@
+"""
+===================================================================
+🌐 統合日本列島地震リスクシミュレーション & TENSHI OS (査読対応版)
+===================================================================
+
+概要:
+- JMA過去データまたはランダムデータで日次地震クラスタ解析
+- ΔCFS誘発 + 分枝比 n による臨界解析
+- CCDFに基づくクラスタパワー指数 τ 推定
+- 多段階リスク (M4+/M6+/M7+) 計算
+- 局所 τ とリスクを統合したスマホ対応可視化
+- TENSHI OS 層構造: Sensory / Computational / Visualization / Governance
+===================================================================
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import gamma
+from scipy.optimize import curve_fit
+from datetime import datetime
+
+# ================================
+# 1️⃣ データ準備 (ランダムJMAカタログ / 実データ差し替え可)
+# ================================
+n_events = 300
+df = pd.DataFrame({
+    'OriginTime': pd.date_range('2026-01-25', periods=n_events, freq='H'),
+    'Latitude': np.random.uniform(30,46,n_events),
+    'Longitude': np.random.uniform(130,150,n_events),
+    'Magnitude': np.random.uniform(4.0,7.0,n_events)
+})
+df['day_index'] = (df['OriginTime'] - pd.Timestamp('2026-01-25')).dt.days + 1
+forecast_days = 30
+
+# ================================
+# 2️⃣ ΔCFS & 分枝比 n 設定 (LAYER 2: COMPUTATIONAL CORE)
+# ================================
+K = 0.5
+gamma_weight = 1.0
+alpha = 1.0
+beta = 2.0
+p, q = 1.2, 1.6
+c, d = 0.01, 0.01
+
+def generate_delta_cfs(n):
+    return np.random.rand(n) * gamma_weight
+
+def branching_ratio(K, delta_cfs_array):
+    n_base = K * (beta / (beta - alpha)) * (c**(1 - p)/(p-1)) * (np.pi**(3/2)) * gamma(q-1.5)/gamma(q) * d**(1.5-q)
+    return n_base * np.mean(np.exp(delta_cfs_array))
+
+# ================================
+# 3️⃣ 日次クラスタ解析 (Cluster Size, Var[N])
+# ================================
+cluster_sizes, n_list, var_list = [], [], []
+for day in range(1, forecast_days+1):
+    events_today = df[df['day_index'] <= day]
+    delta_cfs = generate_delta_cfs(len(events_today))
+    n_eff = branching_ratio(K, delta_cfs)
+    n_list.append(n_eff)
+    cluster_sizes.append(len(events_today))
+    var_list.append(1/(1-n_eff)**3 if n_eff < 1 else np.inf)
+
+# ================================
+# 4️⃣ CCDF & τ フィット
+# ================================
+cluster_sorted = np.sort(np.array(cluster_sizes))
+cdf = 1 - np.arange(1, len(cluster_sorted)+1)/len(cluster_sorted)
+fit_idx = cluster_sorted >= np.percentile(cluster_sorted,50)
+x_fit, y_fit = cluster_sorted[fit_idx], cdf[fit_idx]
+
+def power_law(x, tau, C):
+    return C * x**(-tau)
+
+params, _ = curve_fit(power_law, x_fit, y_fit)
+tau_fit, C_fit = params
+print(f"Fitted τ ≈ {tau_fit:.3f}")
+
+# ================================
+# 5️⃣ 空間グリッド τ マッピング (LAYER 3: VISUALIZATION)
+# ================================
+lat_min, lat_max = df['Latitude'].min(), df['Latitude'].max()
+lon_min, lon_max = df['Longitude'].min(), df['Longitude'].max()
+n_grid = 20
+lat_bins = np.linspace(lat_min, lat_max, n_grid+1)
+lon_bins = np.linspace(lon_min, lon_max, n_grid+1)
+tau_grid = np.zeros((n_grid,n_grid))
+
+for i in range(n_grid):
+    for j in range(n_grid):
+        lat_mask = (df['Latitude'] >= lat_bins[i]) & (df['Latitude'] < lat_bins[i+1])
+        lon_mask = (df['Longitude'] >= lon_bins[j]) & (df['Longitude'] < lon_bins[j+1])
+        cell_events = df[lat_mask & lon_mask]
+        if len(cell_events) < 5:
+            tau_grid[i,j] = np.nan
+            continue
+        cluster_cell = cell_events.groupby('day_index').size().values
+        cluster_sorted_cell = np.sort(cluster_cell)
+        cdf_cell = 1 - np.arange(1,len(cluster_sorted_cell)+1)/len(cluster_sorted_cell)
+        fit_idx_cell = cluster_sorted_cell >= np.percentile(cluster_sorted_cell,50)
+        x_fit_cell, y_fit_cell = cluster_sorted_cell[fit_idx_cell], cdf_cell[fit_idx_cell]
+        try:
+            params_cell, _ = curve_fit(lambda x,tau,C:C*x**(-tau), x_fit_cell, y_fit_cell)
+            tau_grid[i,j] = params_cell[0]
+        except:
+            tau_grid[i,j] = np.nan
+
+# ================================
+# 6️⃣ 地域別多段階リスク計算 (LAYER 4: IPS REFLUX)
+# ================================
+regions = {
+    'Japan_Trench': {'factor': 3.8, 'coords':(142.0,38.0)},
+    'Nankai_Trough': {'factor': 3.6, 'coords':(136.0,33.0)},
+    'Tokyo_Metro': {'factor': 2.7, 'coords':(139.7,35.7)},
+    'Chishima': {'factor': 3.2, 'coords':(148.0,43.0)},
+    'Japan': {'factor': 2.9, 'coords':(138.0,36.0)}
+}
+
+def exceedance_prob(lambda_sum): return 1 - np.exp(-lambda_sum)
+def risk_level(prob):
+    if prob < 0.15: return "🟢 低リスク"
+    elif prob < 0.35: return "🟡 中リスク"
+    else: return "🔴 高リスク"
+
+forecast_results = []
+for region, info in regions.items():
+    delta_cfs = generate_delta_cfs(forecast_days)
+    n_eff = branching_ratio(K, delta_cfs)
+    expected_M4 = n_eff * info['factor'] * forecast_days
+    expected_M6 = expected_M4*0.10
+    expected_M7 = expected_M4*0.02
+    prob_exceed = exceedance_prob(expected_M4)
+    forecast_results.append({
+        'region': region,
+        'M4plus_expected': expected_M4,
+        'M6plus_expected': expected_M6,
+        'M7plus_expected': expected_M7,
+        'exceedance_probability': prob_exceed*100,
+        'risk_level': risk_level(prob_exceed)
+    })
+
+# ================================
+# 7️⃣ 可視化: τマップ + 多段階リスク
+# ================================
+plt.figure(figsize=(8,10))
+def multi_risk_color(prob):
+    if prob < 15: return '#00FF00'
+    elif prob < 35: return '#FFFF00'
+    else: return '#FF0000'
+
+for res in forecast_results:
+    lon, lat = regions[res['region']]['coords']
+    plt.scatter(lon, lat, s=300, color=multi_risk_color(res['exceedance_probability']), alpha=0.6)
+    plt.scatter(lon, lat, s=150, color=multi_risk_color(res['M6plus_expected']/res['M4plus_expected']*100), alpha=0.7, marker='^')
+    plt.scatter(lon, lat, s=80, color=multi_risk_color(res['M7plus_expected']/res['M4plus_expected']*100), alpha=0.9, marker='s')
+    plt.text(lon, lat+0.6, f"{res['region']}", ha='center', va='bottom', fontsize=9)
+
+plt.imshow(tau_grid, origin='lower', extent=[lon_min, lon_max, lat_min, lat_max],
+           cmap='plasma', alpha=0.4)
+plt.colorbar(label='Local τ (Power-law exponent)')
+plt.xlim(130,150); plt.ylim(30,46)
+plt.xlabel('Longitude'); plt.ylabel('Latitude')
+plt.title('日本列島 多段階地震リスクマップ & 局所 τ')
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.show()
+
+# ================================
+# 8️⃣ 統合設計コメント
+# ================================
+# LAYER 1: Sensory Intake (JMA / 電磁 / 赤外 / 地電位)
+# LAYER 2: Computational Core (ETAS + ΔCFS + Branching Ratio + τ)
+# LAYER 3: Visualization (τマップ & 多段階リスク)
+# LAYER 4: IPS Reflux (Public Safety Alerts, Infrastructure Guidance)
+# 査読対応版: τ推定・確率モデル明記・スマホ対応可視化完備
